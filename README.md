@@ -30,6 +30,26 @@ uv pip check --python .venv/bin/python
 
 输入或业务规则无效、输出已存在时退出2，保留原目标；成功退出0。报告/数据库先完整生成再原子新建，无覆盖。run/为忽略目录。
 
+## 档案工作台演示（持续摄取 / 保全 / 复核清除）
+
+工作台是独立数据库格式，与 v1 档案互不通用；把 v1 库传给 v2 命令退出 2 且原库不变。以下演示：旧回复 R 指向缺失的父邮件 P，保全锚点 A 起初不覆盖 R；P 迟到补链后 R 进入保全，原计划被整次阻断；解除保全后执行只清除原候选，迟到且同样到期的 P 不受影响。
+
+```sh
+.venv/bin/mail-archive vault-init --source fixtures/vault/batch1 --db run/vault.sqlite
+.venv/bin/mail-archive hold-add --db run/vault.sqlite --hold-id LEGAL-1 --anchor '<anchor-a@example.invalid>'
+.venv/bin/mail-archive retention-plan --db run/vault.sqlite --plan-id Q1 --before 2026-11-04T00:00:00Z
+.venv/bin/mail-archive vault-ingest --source fixtures/vault/batch2 --db run/vault.sqlite
+.venv/bin/mail-archive retention-apply --db run/vault.sqlite --plan-id Q1   # 退出2，stderr给出阻断JSON
+.venv/bin/mail-archive hold-release --db run/vault.sqlite --hold-id LEGAL-1
+.venv/bin/mail-archive retention-apply --db run/vault.sqlite --plan-id Q1   # 清除R，输出收据
+.venv/bin/mail-archive retention-apply --db run/vault.sqlite --plan-id Q1   # 重试直接返回首次收据
+.venv/bin/mail-archive retention-show --db run/vault.sqlite --plan-id Q1    # 冻结计划+原收据
+.venv/bin/mail-archive vault-thread --db run/vault.sqlite --message-id '<parent-p@example.invalid>'
+.venv/bin/mail-archive vault-search --db run/vault.sqlite --query ledger
+```
+
+预期：计划 `candidates` 只有 `<reply-r@example.invalid>`；摄取补入 `<parent-p@example.invalid>`（它回复锚点 A，A 始终未归档）后，R 沿补全的父链进入保全，执行整次阻断并列出 `blocked`；解除后执行 `purged` 只含 R；再次执行返回同一收据；线程中 R 为 `purged`（无 subject/sender 字段）且不断开与 P 的连接；`ledger` 搜索只剩 P——已清除载荷不可再检索。工作台身份为每次建库随机生成，计划与收据通过它绑定本工作台。
+
 ## 契约与边界
 
 详见[数据契约](docs/contract.md)。需SQLite支持FTS5。仅支持契约列明的邮件子集；不获取外链，不连接邮件服务，不提取附件到磁盘。
