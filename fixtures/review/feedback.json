@@ -1,0 +1,13 @@
+{
+  "review_id": "EXTREV-1",
+  "package_sha256": "d4804e6ea4a60f40a5099abd567d8e098ca1e80e713ece7e1f0381771483ee35",
+  "return_id": "RETURN-1",
+  "annotations": [
+    {"annotation_id": "ANN-LITERAL", "item_id": "M0001", "start": 31, "end": 41,
+     "comment": "literal marker kept as original text"},
+    {"annotation_id": "ANN-JP", "item_id": "M0002", "start": 45, "end": 48,
+     "comment": "日本語 annotation maps across code points"},
+    {"annotation_id": "ANN-CRANE", "item_id": "M0002", "start": 32, "end": 37,
+     "comment": "crane check"}
+  ]
+}

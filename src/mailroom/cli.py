@@ -2,7 +2,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from . import vault
+from . import vault, review
 from .archive import build, search, thread
 
 
@@ -47,6 +47,21 @@ def main():
     vchain = commands.add_parser("vault-thread")
     vchain.add_argument("--db", required=True)
     vchain.add_argument("--message-id", required=True)
+    ropen = commands.add_parser("review-open")
+    ropen.add_argument("--db", required=True)
+    ropen.add_argument("--spec", required=True)
+    rexport = commands.add_parser("review-export")
+    rexport.add_argument("--db", required=True)
+    rexport.add_argument("--review-id", required=True)
+    rexport.add_argument("--output", required=True)
+    rreturn = commands.add_parser("review-return")
+    rreturn.add_argument("--db", required=True)
+    rreturn.add_argument("--review-id", required=True)
+    rreturn.add_argument("--package", required=True)
+    rreturn.add_argument("--feedback", required=True)
+    rnotes = commands.add_parser("review-notes")
+    rnotes.add_argument("--db", required=True)
+    rnotes.add_argument("--message-id", required=True)
     args = p.parse_args()
     try:
         if args.command == "import":
@@ -71,6 +86,15 @@ def main():
             result = vault.retention_apply(args.db, args.plan_id)
         elif args.command == "vault-search":
             result = vault.vault_search(args.db, args.query)
+        elif args.command == "review-open":
+            result = review.review_open(args.db, args.spec)
+        elif args.command == "review-export":
+            result = review.review_export(args.db, args.review_id, args.output)
+        elif args.command == "review-return":
+            result = review.review_return(
+                args.db, args.review_id, args.package, args.feedback)
+        elif args.command == "review-notes":
+            result = review.review_notes(args.db, args.message_id)
         else:
             result = vault.vault_thread(args.db, args.message_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))

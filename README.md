@@ -50,6 +50,23 @@ uv pip check --python .venv/bin/python
 
 预期：计划 `candidates` 只有 `<reply-r@example.invalid>`；摄取补入 `<parent-p@example.invalid>`（它回复锚点 A，A 始终未归档）后，R 沿补全的父链进入保全，执行整次阻断并列出 `blocked`；解除后执行 `purged` 只含 R；再次执行返回同一收据；线程中 R 为 `purged`（无 subject/sender 字段）且不断开与 P 的连接；`ledger` 搜索只剩 P——已清除载荷不可再检索。工作台身份为每次建库随机生成，计划与收据通过它绑定本工作台。
 
+## 外部审阅演示（脱敏交付 / 圈选回收 / 清除边界）
+
+档案员在 vault 内登记审阅批次，外部审阅者只拿到不含内部 Message-ID 的脱敏交付件；回收意见时交付坐标精确回映到源正文。演示数据在 `fixtures/review/`：三封邮件中 `<review-b@…>` 回复 `<review-a@…>`（父在批次内），`<review-c@…>` 的父邮件未选入（其内部 ID 不得出现在交付件中）。SPEC 对交叠/相邻区间取并集，并同时保留正文里的字面量 `[REDACTED]` 与多字节日文。
+
+```sh
+.venv/bin/mail-archive vault-init --source fixtures/review/batch1 --db run/review.sqlite
+.venv/bin/mail-archive review-open   --db run/review.sqlite --spec fixtures/review/spec.json
+.venv/bin/mail-archive review-export --db run/review.sqlite --review-id EXTREV-1 --output run/package.json
+.venv/bin/mail-archive review-return --db run/review.sqlite --review-id EXTREV-1 \
+    --package run/package.json --feedback fixtures/review/feedback.json
+.venv/bin/mail-archive review-notes  --db run/review.sqlite --message-id '<review-b@example.invalid>'
+```
+
+预期：登记摘要仅为 `{"review_id":"EXTREV-1","item_count":3}`；交付件 `format` 为 `mailroom-review-1`，项目按 `M0001..M0003` 排序，M0002 的 `parent_item_id` 为 `M0001`，M0001/M0003 为 `null`，且文件中找不到任何尖括号内部 ID 或 `unselected-grandparent`；交付摘要固定为 `d4804e6ea4a60f40a5099abd567d8e098ca1e80e713ece7e1f0381771483ee35`，文件为紧凑键排序 JSON、无尾随换行。回收收据的 `annotation_ids` 为 `["ANN-CRANE","ANN-JP","ANN-LITERAL"]`；notes 显示日文圈选交付 `[45,48)` 精确落回源 `[40,43)`，正文里未遮盖的字面量标记交付 `[31,41)` 落回源 `[26,36)`。换一个不存在的输出路径重复 `review-export` 得到字节相同的文件；同一 SPEC/FEEDBACK 重送返回同一摘要与收据。
+
+清除边界：对演示 vault 执行一次 retention 清除后，`review-export` 退出 2 且不留半文件；已接受反馈用原 return_id 重送仍返回原收据，而新 return_id 的新意见整份拒绝；`review-notes` 仍可凭源身份查到坐标，但任何返回都不含正文、主题或发件人。
+
 ## 契约与边界
 
 详见[数据契约](docs/contract.md)。需SQLite支持FTS5。仅支持契约列明的邮件子集；不获取外链，不连接邮件服务，不提取附件到磁盘。

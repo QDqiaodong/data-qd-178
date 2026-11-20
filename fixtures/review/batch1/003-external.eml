@@ -1,0 +1,10 @@
+From: external.auditor@example.invalid
+To: auditors@example.invalid
+Date: Mon, 02 Nov 2026 11:00:00 +0000
+Message-ID: <review-c@example.invalid>
+In-Reply-To: <unselected-grandparent@example.invalid>
+Subject: Auditor cover note
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Harbor gamma: budget 7700 and the lock works.

@@ -1,0 +1,8 @@
+{
+  "review_id": "EXTREV-1",
+  "messages": [
+    {"message_id": "<review-c@example.invalid>", "redactions": []},
+    {"message_id": "<review-a@example.invalid>", "redactions": [[20, 23], [23, 25]]},
+    {"message_id": "<review-b@example.invalid>", "redactions": [[19, 24]]}
+  ]
+}
