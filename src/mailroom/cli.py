@@ -2,7 +2,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from . import vault, review
+from . import vault, review, collection
 from .archive import build, search, thread
 
 
@@ -62,6 +62,15 @@ def main():
     rnotes = commands.add_parser("review-notes")
     rnotes.add_argument("--db", required=True)
     rnotes.add_argument("--message-id", required=True)
+    cimport = commands.add_parser("collection-import")
+    cimport.add_argument("--db", required=True)
+    cimport.add_argument("--manifest", required=True)
+    cshow = commands.add_parser("collection-show")
+    cshow.add_argument("--db", required=True)
+    cshow.add_argument("--intake-id", required=True)
+    vprov = commands.add_parser("vault-provenance")
+    vprov.add_argument("--db", required=True)
+    vprov.add_argument("--message-id", required=True)
     args = p.parse_args()
     try:
         if args.command == "import":
@@ -95,6 +104,12 @@ def main():
                 args.db, args.review_id, args.package, args.feedback)
         elif args.command == "review-notes":
             result = review.review_notes(args.db, args.message_id)
+        elif args.command == "collection-import":
+            result = collection.collection_import(args.db, args.manifest)
+        elif args.command == "collection-show":
+            result = collection.collection_show(args.db, args.intake_id)
+        elif args.command == "vault-provenance":
+            result = collection.vault_provenance(args.db, args.message_id)
         else:
             result = vault.vault_thread(args.db, args.message_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))

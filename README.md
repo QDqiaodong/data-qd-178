@@ -67,6 +67,19 @@ uv pip check --python .venv/bin/python
 
 清除边界：对演示 vault 执行一次 retention 清除后，`review-export` 退出 2 且不留半文件；已接受反馈用原 return_id 重送仍返回原收据，而新 return_id 的新意见整份拒绝；`review-notes` 仍可凭源身份查到坐标，但任何返回都不含正文、主题或发件人。
 
+## 多保管人取证包核对入档（collection-import / collection-show / vault-provenance）
+
+一次带来若干完整采集包，每包的 `value` 代表整批来源证明，不能拆包挑项。以下演示基线只有回复 R（父邮件 P 缺失）：`PKG-X` 价值高但带来一份会让 R 闭环的 P；`PKG-Y` 价值低但带来另一版本的 P，P 回复锚点 A。两者对 P 的原始字节不同，不能同选；X 单独又与基线闭环。最终入档 Y（让存量 R 的根变为 A），X 的收据原因为 `selected_identity_conflict`。
+
+```sh
+.venv/bin/mail-archive vault-init --source fixtures/collection/baseline --db run/collect.sqlite
+.venv/bin/mail-archive collection-import --db run/collect.sqlite --manifest fixtures/collection/manifest.json
+.venv/bin/mail-archive collection-show --db run/collect.sqlite --intake-id COLLECT-1
+.venv/bin/mail-archive vault-provenance --db run/collect.sqlite --message-id '<parent-p@example.invalid>'
+```
+
+预期：`selected_packages` 为 `["PKG-Y"]`，`total_value` 为 10，`inserted` 为 `["<parent-p@example.invalid>"]`；`excluded` 只有 `PKG-X`，`reason` 为 `selected_identity_conflict`，`witness` 为 `["<parent-p@example.invalid>"]`。`collection-show` 返回同一首次收据；`vault-provenance` 列出 `PKG-Y`/`CUST-Y`/10 一条来源。若该 intake 前已存在锚定 A 的保全与预先含 R 的清除计划，Y 入档后 R 沿补全父链进入保全，执行旧计划应被整次阻断。`PKG-X` 独用另一没有 Y 的独立输入时得到空选择，`excluded` 为真正闭合父链的 `reply_cycle` witness。
+
 ## 契约与边界
 
 详见[数据契约](docs/contract.md)。需SQLite支持FTS5。仅支持契约列明的邮件子集；不获取外链，不连接邮件服务，不提取附件到磁盘。

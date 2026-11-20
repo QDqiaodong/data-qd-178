@@ -1,0 +1,7 @@
+{
+  "intake_id": "COLLECT-1",
+  "packages": [
+    {"package_id": "PKG-X", "custodian": "CUST-X", "value": 50, "source": "package-x"},
+    {"package_id": "PKG-Y", "custodian": "CUST-Y", "value": 10, "source": "package-y"}
+  ]
+}
