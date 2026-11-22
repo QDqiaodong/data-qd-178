@@ -2,7 +2,8 @@ import argparse
 import json
 import sqlite3
 import sys
-from . import vault, review, collection, recovery, mbox
+import zlib
+from . import vault, review, collection, recovery, mbox, investigate
 from .archive import build, search, thread
 
 
@@ -103,6 +104,15 @@ def main():
     mcert = commands.add_parser("mbox-certify")
     mcert.add_argument("--db", required=True)
     mcert.add_argument("--source-id", required=True)
+    ainv = commands.add_parser("attachment-investigate")
+    ainv.add_argument("--db", required=True)
+    ainv.add_argument("--spec", required=True)
+    ainv.add_argument("--output", required=True)
+    adel = commands.add_parser("attachment-deliver")
+    adel.add_argument("--db", required=True)
+    adel.add_argument("--report", required=True)
+    adel.add_argument("--report-sha256", required=True)
+    adel.add_argument("--output", required=True)
     args = p.parse_args()
     try:
         if args.command == "import":
@@ -164,6 +174,11 @@ def main():
             result = mbox.mbox_resolve(args.db, args.decision)
         elif args.command == "mbox-certify":
             result = mbox.mbox_certify(args.db, args.source_id)
+        elif args.command == "attachment-investigate":
+            result = investigate.investigate(args.db, args.spec, args.output)
+        elif args.command == "attachment-deliver":
+            result = investigate.deliver(args.db, args.report,
+                                         args.report_sha256, args.output)
         else:
             result = vault.vault_thread(args.db, args.message_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))
@@ -171,7 +186,8 @@ def main():
         detail = {"error": "held", "blocked": exc.blocked}
         sys.stderr.write(json.dumps(detail, ensure_ascii=False, indent=2) + "\n")
         p.exit(2)
-    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error, OverflowError) as exc:
+    except (OSError, ValueError, KeyError, TypeError, sqlite3.Error,
+            OverflowError, zlib.error) as exc:
         p.exit(2, f"mail-archive: {exc}\n")
 
 

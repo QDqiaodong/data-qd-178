@@ -143,3 +143,18 @@ PYTHONPATH=src python3 tooling/mbox_demo.py     # 打印范围/摘要/凭据等�
 ```
 
 预期：未封口时最后一条没有下一 envelope 的记录不提前入档、不占序号；台账公开 `next_offset`、`pinned_bytes`、`pinned_sha256`，续扫逐字节复核承诺前缀（伪造 mtime 不掩盖改写，搬动文件可续扫，封口后任何追加拒绝）。隔离 reason 按 `oversize`、`invalid_mail`、`identity_conflict`、`reply_cycle` 优先级记录且扫描继续；超限记录被完整跨过，源字节读取缓冲固定有界。`mbox-resolve` 的 `replace` 同时保留原坏记录摘要与补正材料摘要，`waive` 不入档邮件；同决定重送返回原收据。凭据只在封口、扫完且无 unresolved 时出具，此后清除邮件不改首次分类，恢复副本只允许 `mbox-show`，三个写入口一律拒绝。
+
+## 离线附件指标调查与取证交付（attachment-*）
+
+调查员提供一组目标文件 SHA256，命令从 vault 已归档邮件 bytes 重新取证，遍历所选邮件附件及嵌套 ZIP，区分“确实没找到”与“因加密、损坏或预算不足而没查完”，并只在操作者批准完整报告后交付实际命中的叶文件。嵌套 ZIP 流式读取、固定 256 KiB 窗口，展开缓冲不随预算或实际展开量增长；嵌套容器仅落本次私有临时文件并在用完即删。独立预期值由 `tooling/attachment_demo.py` 重新计算（ZIP 布局与摘要先于被测命令构造）。
+
+```sh
+PYTHONPATH=src python3 tooling/attachment_demo.py     # 打印命中路径/报告摘要/交付清单独立预期值
+.venv/bin/mail-archive attachment-investigate --db run/vault.sqlite \
+    --spec investigation-spec.json --output run/attachment-report.json
+RSHA=$(sha256sum run/attachment-report.json | cut -d' ' -f1)
+.venv/bin/mail-archive attachment-deliver --db run/vault.sqlite \
+    --report run/attachment-report.json --report-sha256 "$RSHA" --output run/delivery
+```
+
+SPEC 恰含 `messages`（1..100 个当前 live 的 Message-ID）、`indicators`（1..128 个小写十六进制 SHA256）与 `limits`（`max_depth` 1..4、`max_members` 1..2000、`max_expanded_bytes` 1..1,073,741,824，预算按每个顶层附件独立计算）。调查 stdout 恰含 `vault`、`sha256`、`bytes`；报告为紧凑键排序 JSON、无尾随换行，root 状态为 `matched`/`clear`/`indeterminate`，问题 reason 取 `depth_limit`、`member_limit`、`byte_limit`、`encrypted`、`unsupported_compression`、`invalid_zip`。任一 root indeterminate 时 deliver 整次拒绝；全部完整时 `delivery/` 恰含 `manifest.json` 与 `blobs/`，相同命中只落一个 blob 但保留每次物理出现的来源，空命中交付空清单且 `blobs/` 仍存在。deliver stdout 恰含 `vault`、`report_sha256`、`blob_count`、`occurrence_count`。两命令只读，数据库字节与恢复 revision 不变；详见[数据契约](docs/contract.md)。

@@ -275,3 +275,51 @@ DECISION 是沿用项目重复键拒绝、非有限值拒绝与 8MB 防护的严
 检查点格式在原六键结构不变的前提下扩展 `tables`：新增 `vault_mbox_sources`、`vault_mbox_records`、`vault_mbox_certificates` 三张逻辑表，列集合固定并随恢复校验不变量（封口状态、范围、摘要、status/reason/admission 取值、证书只引用封口来源等）。旧格式检查点不含这三张表，恢复时按空台账处理并继续按原契约恢复，不拒绝、不重签旧文件；未使用本功能的旧 vault/旧检查点不因缺表变成错误。完整检查点保存进度、承诺前缀、封口、隔离与处置、首次凭据，不保存外部源文件。恢复后 show 展示检查点时点的台账与凭据，后来才入档/处置/封口的记录不注入；权威清单抑制载荷不改写历史入档分类，凭据不因载荷被抑制而重算。recovered 副本仅允许 `mbox-show`；`mbox-scan`、`mbox-resolve`、`mbox-certify` 三个变更入口（含真实成功重送）在 CLI 与库函数层面都先拒绝。沿用抑制载荷不得回写恢复输出或暂存文件的原约束。
 
 成功退出 0；结构、路径、来源身份、补正冲突、结案条件、只读限制或环境故障退出 2。可隔离的坏记录是 scan 的正常成功结果。失败保留上次完整可读状态，首次建表也不留下半次台账。
+
+# 离线附件指标调查与取证交付（attachment-investigate / attachment-deliver）
+
+两个新命令是既有 vault 之上的只读功能：只从已归档 `source_bytes` 取证，从不回读历史目录、mbox、检查点或任何外部交付副本；不登记业务记录、不改恢复 revision、不自动保全邮件，也不把附件 bytes 写回 vault。仅用 Python 标准库，无网络、无病毒扫描、无解密、无后台服务。v1 库、缺失库与无效库对两个命令一律退出 2 且不被创建或改写；source 与 recovered vault 均可执行，但恢复时被权威清单抑制（已 purged）的邮件无法通过当前 live 检查。
+
+## SPEC
+
+SPEC 是不超过 8,000,000 字节的严格 JSON 对象，恰含 `messages`、`indicators`、`limits`，拒绝重复键、`NaN/Infinity/-Infinity` 等非有限数与未声明字段。`messages` 是 1..100 个无重复 Message-ID（沿用尖括号语法），调查时每封必须当前存在且 `live`；`indicators` 是 1..128 个无重复的 64 位小写十六进制 SHA256。两数组的输入次序不参与规范身份，报告中均按字符串排序。`limits` 恰含非布尔整数 `max_depth`（1..4）、`max_members`（1..2000）、`max_expanded_bytes`（1..1,073,741,824），是每个顶层附件各自独立的调查预算，不跨附件共享。选中邮件没有附件是合法调查，不自动加入线程邻居或其他邮件；选中范围内顶层附件总数超过 200 时整体拒绝，不截取前 200 个。
+
+## 证据完整性
+
+调查在同一个只读快照中先核对每封邮件归档 bytes 的源 SHA256，再用现有 MIME 子集重新解析：`msg.walk()` 的序号即附件 part 身份，含 filename 或 Content-Disposition 为 attachment 的非 multipart 部分才是附件；附件内容是 transfer decoding 后的原始 bytes，不做文本、换行或字符集规范化。重新解析得到的每个附件的 part、filename、media_type、size_bytes、sha256 必须与 `vault_attachments` 完全一致。邮件缺失、非 live、源摘要不符、附件表与重解析结果不一致都属于证据完整性错误，使整个命令失败（退出 2），不得归类为 ZIP 检查不完整，也不得只凭数据库摘要推断内容。
+
+## 容器识别、路径与物理身份
+
+顶层附件的 media_type 为 `application/zip`，或非 null filename 经 `lower()` 以 `.zip` 结尾时视为 ZIP 容器；其他附件是叶文件。ZIP 内部非目录成员只按 `ZipInfo.filename` 经 `lower()` 的 `.zip` 后缀决定是否继续作为容器，不做魔数猜测；文件名解码沿用 zipfile 口径，不自行做 Unicode 规范化。一个宣称是 ZIP 的节点即使打不开也不退化为普通叶文件：根容器打不开时 issue 路径为 `[]`，reason 为 `invalid_zip`。容器本身不参与 indicators 匹配；只有完整读完、解压并通过 CRC 校验的叶文件按实际 bytes 的 SHA256 匹配，空叶文件可以命中，空 ZIP 是检查完整且无叶文件的容器。
+
+每个 ZIP 按中央目录成员出现次序处理，序号从 1 开始且包含目录项；递归先完整走完当前子容器再继续下一个兄弟。叶文件 `path` 是从顶层附件向下经过的成员序号数组，顶层本身为叶文件时为 `[]`；各层序号以本层中央目录为准，不按文件名排序。重复文件名、相同内容以及同一 ZIP 在两个位置出现都保持独立物理身份，不按名称或摘要去重后再计算预算或生成来源。成员名只是证据标签：`../x`、绝对路径、反斜杠、同名项与外部属性里的符号链接标志都不会成为实际写入路径，非目录成员一律按普通数据处理，不创建归档内声明的目录或符号链接。
+
+## 预算与检查问题
+
+仅支持无密码、压缩方法为 ZIP_STORED 或 ZIP_DEFLATED 的成员，必须读到 EOF、完成解压并通过 CRC，不能靠匹配前缀或声明长度提前认定叶文件有效。目录项以 `is_dir()` 判断且不产生叶文件；其声明解压长度必须为 0，否则按损坏处理。根容器深度为 1，成员 ZIP 比父容器深一层；需要进入超过 `max_depth` 的容器时为 `depth_limit`，不展开它。`max_members` 统计该顶层附件整棵递归树遇到的全部 ZIP 目录项（含目录项、重复内容、嵌套 ZIP 成员本身），尝试进入第 max_members+1 个目录项时为 `member_limit`。
+
+`max_expanded_bytes` 按实际读取的 ZIP 非目录成员解压字节累计：嵌套 ZIP 文件自身的 bytes 先计费，其内部成员解压时再次计费；重复物理出现分别累计。顶层 ZIP 自身已归档的压缩 bytes 不计入，顶层普通叶文件的 bytes 计入。恰等于预算允许，只有读到下一实际字节才判定 `byte_limit`；探测越界最多多读一个字节，该字节不得成为已检查叶文件或交付内容，绝不依据 `ZipInfo.file_size` 宣称检查完毕。
+
+固定检查顺序为：进入目录项前先查成员数预算；对该项依次查加密标志（`encrypted`）、压缩方法（`unsupported_compression`），然后读取；需要打开已读完的嵌套 ZIP 时再查深度；读取期间的结构、解压或 CRC 错误立即为 `invalid_zip`；成功取得的字节先查展开预算再纳入有效内容。reason 固定为 `depth_limit`、`member_limit`、`byte_limit`、`encrypted`、`unsupported_compression`、`invalid_zip`。遇到第一个问题即停止该顶层附件的后续遍历，保留此前已完整校验的叶文件，再继续下一个顶层附件；根 ZIP 打不开与顶层普通叶文件超字节预算的路径均为 `[]`，其他问题路径为触发问题的成员路径。环境读取、临时文件、磁盘与数据库错误使整个命令失败，不能伪装成正常调查问题。
+
+## 有界内存
+
+除当前原始邮件（≤2MB）及其 MIME 解码载荷外，程序同时驻留的展开内容缓冲总量固定不超过 4 MiB，且不随配置的展开上限或实际展开量线性增长；中央目录与报告身份元数据不计作内容缓冲。叶文件以固定 256 KiB 窗口流式读取并即时哈希，嵌套容器为支持随机读取写入本次私有临时文件，子树走完即删除；成功和失败都清理本次临时产物，不长期缓存附件 bytes。不把整个解压叶文件、整棵展开树或超预算坏成员先读入内存再判断。
+
+## 报告
+
+报告是规范 UTF-8 JSON：`json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)`，无尾随换行。对象恰含 `format`（固定 `mailroom-attachment-report-1`）、`vault`（持久 vault 身份）、`spec`（规范化完整 SPEC）、`messages`（按 Message-ID 排序，每项恰含 `message_id`、`source_sha256`）、`roots`（按 message_id、数值 part 排序）。每个 root 恰含 `message_id`、`part`、`filename`、`media_type`、`size_bytes`、`sha256`、`status`、`issue`、`leaves`；前六项描述顶层附件本身，不能用 ZIP 成员摘要冒充根摘要。每个 leaf 恰含 `path`、`filename`、`size_bytes`、`sha256`、`matched`，顶层普通叶文件 filename 为原附件 filename（允许 null），leaves 按实际遍历次序排列，每个完整叶文件只记一次，不含内容或正文摘录。
+
+root 无检查问题时，有命中为 `matched`、无命中为 `clear`、`issue` 为 null；发生检查问题时 `status` 为 `indeterminate`，`issue` 恰含 `path`、`reason`，即使此前已有 matched=true 的叶文件也仍是 indeterminate，未完成叶文件不进入 leaves，也不能跳过坏成员后把剩余结果声称完整。完整报告超过 8,000,000 字节则整个调查失败且不发布，不截短名称或叶清单。报告只含邮件、附件及成员的规定标签，不含主题、发件人、正文、原始邮件或文件内容。报告在完整生成后才以同目录临时文件+硬链接发布到新路径，目标存在（含悬空符号链接）即拒绝。成功 stdout 恰含 `vault`、`sha256`、`bytes`，后两项是实际报告文件原始字节的 SHA256 与长度；ZIP 不完整调查是 investigate 的正常成功报告，退出 0。
+
+## 批准核对与交付（attachment-deliver）
+
+`--report-sha256` 是操作者批准的报告文件原始字节 SHA256（64 位小写十六进制），程序先核对实际文件摘要，再做严格结构与全部字段校验（未知字段、非法 reason/path、错误类型一律拒绝），然后核对 vault 身份，并以报告中的规范 SPEC 从当前源邮件在同一只读快照内重新调查，按完整规范对象比较预期报告。程序不靠报告自报摘要证明批准，不需要签名，也不寻找“最新”报告；键顺序与无意义空白可不同，但外部 HASH 必须对应实际提交字节。改动指标、丢失一次出现、改写叶清单或路径、附件表与 raw 不一致都不能通过。
+
+只要任意 root 是 indeterminate，整次 deliver 拒绝，不交付其他正常根或该根此前的已知命中；没有命中却存在检查缺口的报告同样不能声称 clear。所有根完整时，只交付 matched=true 的叶文件，绝不连同外层 ZIP、未命中兄弟、邮件原文或只因同名而选中的内容交付。内容相同的命中按 sha256 只落盘一个 blob，同时在 manifest 保留每次独立出现的来源（不同邮件、part、path 均不丢失）；没有命中的完整报告交付空清单。
+
+NEW_DIR 必须尚不存在（包括符号链接）。交付目录恰有 `manifest.json` 与 `blobs/`：blob 文件名就是 64 位 sha256、无扩展名，内容为叶文件原始 bytes。manifest 采用与报告相同的规范 JSON 编码，恰含 `format`（固定 `mailroom-attachment-delivery-1`）、`vault`、`report_sha256`、`blobs`（按 sha256 排序，每项恰含 sha256、size_bytes）、`occurrences`（按 message_id、数值 part、整数数组 path 字典序排序，每项恰含 message_id、source_sha256、part、path、sha256）。一个 blob 在 manifest 恰出现一次，每个命中来源各出现一次；无命中时两数组均为空且 `blobs/` 仍存在。发布前逐文件复核实际长度与摘要吻合清单，目录内全部文件完整核验后才让 NEW_DIR 可见（暂存目录改名发布），失败清理本次暂存与临时文件、保留已有目标和源库，不留半目录；不支持并发发布者。成功 stdout 恰含 `vault`、`report_sha256`、`blob_count`、`occurrence_count`，退出 0；stdout 永不输出叶文件 bytes。
+
+## 生命周期与重试
+
+报告生成后所选邮件被清除，旧报告仍是历史调查材料，但再次 deliver 必须整次拒绝；后来仅摄取 SPEC 之外的邮件、改变无关保全或新增旧功能业务记录，不使准确报告失效。已存在的成功交付是外部副本，不要求撤回；交付到另一个新目录时仍重新检查当前源，不拿上次外部目录当缓存。恢复副本中未被抑制的相同选中来源可产生字节相同的报告与交付文件；被抑制来源不能交付。两个新命令前后数据库字节与 revision 不变。输入、证据完整性、批准摘要、源状态、路径、交付条件或环境错误退出 2。
