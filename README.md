@@ -129,3 +129,17 @@ ASHA=$(sha256sum run/authority.json | cut -d' ' -f1)
 详见[数据契约](docs/contract.md)。需SQLite支持FTS5。仅支持契约列明的邮件子集；不获取外链，不连接邮件服务，不提取附件到磁盘。
 
 样例均为本仓原创合成数据，来源见[说明](fixtures/SOURCES.md)，代码/样例MIT许可。业务演示和测试不访问网络，不需要容器或外部服务。
+
+## 可续读 mboxrd 邮箱取证（mbox-*）
+
+保管人分几次追加同一个大 mboxrd 邮箱：坏邮件隔离为缺口而不中断后续记录，承诺前缀逐字节可续扫，封口并处置全部缺口后才出具冻结的完整性凭据。以下演示用合成邮箱覆盖“坏 P 隔离 → 合法 S 入档 → 未完成 X 等待 → 追加后 X 仅处理一次 → 补正 P 并让回复 R 归根到锚点 A → 封口结案”，全部独立预期摘要由 `tooling/mbox_demo.py` 重新计算（不引用被测模块自报值）。
+
+```sh
+PYTHONPATH=src python3 tooling/mbox_demo.py     # 打印范围/摘要/凭据等独立预期值
+.venv/bin/mail-archive mbox-scan    --db run/mbx.sqlite --source-id CASE-1 --source inbox.mbox [--limit N] [--seal]
+.venv/bin/mail-archive mbox-show    --db run/mbx.sqlite --source-id CASE-1
+.venv/bin/mail-archive mbox-resolve --db run/mbx.sqlite --decision decision.json
+.venv/bin/mail-archive mbox-certify --db run/mbx.sqlite --source-id CASE-1
+```
+
+预期：未封口时最后一条没有下一 envelope 的记录不提前入档、不占序号；台账公开 `next_offset`、`pinned_bytes`、`pinned_sha256`，续扫逐字节复核承诺前缀（伪造 mtime 不掩盖改写，搬动文件可续扫，封口后任何追加拒绝）。隔离 reason 按 `oversize`、`invalid_mail`、`identity_conflict`、`reply_cycle` 优先级记录且扫描继续；超限记录被完整跨过，源字节读取缓冲固定有界。`mbox-resolve` 的 `replace` 同时保留原坏记录摘要与补正材料摘要，`waive` 不入档邮件；同决定重送返回原收据。凭据只在封口、扫完且无 unresolved 时出具，此后清除邮件不改首次分类，恢复副本只允许 `mbox-show`，三个写入口一律拒绝。

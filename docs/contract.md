@@ -223,3 +223,55 @@ MANIFEST 是严格 JSON 对象，恰含 `intake_id` 与 `packages`，不接受�
 新命令所有成功 stdout 均为一个 JSON 对象：`recovery-enable`、`recovery-info`、`recovery-restore` 使用恰含 `mode`、`vault`、`stream`、`revision`、`checkpoint_sha256`、`authority_sha256`、`authority_revision`、`suppressed` 的对象——`source` 模式下后三个摘要/清单水位字段为 `null`、`suppressed` 为 `[]`；`recovered` 模式填写持久来源，数组为空时也保留。原命令输出形状不变。
 
 检查点/清单完整生成核验后才发布到新路径；恢复库完整建成、数据与索引核验完成且 `recovered` 锁已持久化后才发布。失败不留下可误认成功的输出或本次临时文件，不改源库、输入备份或已有目标；成功输出丢失后可用新输出路径重试（不要求覆盖旧文件）。所有成功退出 0，格式/路径/来源/水位/身份/只读限制或数据库错误退出 2。无需抵御操作者手工改库或自行移除锁。
+
+# 可续读 mboxrd 邮箱取证接入（mbox-scan / mbox-show / mbox-resolve / mbox-certify）
+
+本节在既有 vault 之上增加物理邮箱台账：保管人可分多次追加同一个大邮箱文件，调查人员按明确的 mboxrd 子集逐记录入档；坏记录隔离为缺口而不中断后续证据，缺口经人工补正或豁免、来源封口且全部记录有最终处置后，才出具并冻结首次完整性凭据。仅用 Python 标准库，无网络、无并发写入、无后台服务。v1 档案与不存在的库对新命令一律拒绝，且不会被创建或改写；新表按需在当前 vault 创建，从未使用本功能的 vault 不报错、不建表。命令不改变 v1、vault、审阅、采集与恢复的任何既有契约，也不套用目录摄取的 40MB 总量或文件数上限。
+
+## 明确的 mboxrd 子集与字节口径
+
+不自动猜测邮箱格式。原始文件按字节处理：行以 LF 结束，可保留其前导 CR。完整 envelope 分隔行是从行首开始、前五字节恰为 ASCII `From ` 并以 LF 结束的整行，不校验行内寄件人与日期。除空文件外，第一行必须是这样的分隔行；文件开头不足一行时，仅当当前字节仍可能构成 `From ` 前缀才作为未完成尾部等待，明显不匹配则整次拒绝。每条记录从一个 envelope 行开头到下一 envelope 行开头，最后一条只能在来源封口后以 EOF 为结束。envelope 行不属于邮件原文；其后各行若行首是一个或多个 `>` 紧接 `From `，仅去掉最前面的一个 `>`，其余字节、换行与末尾是否换行原样保留（CR、UTF-8 与多段 MIME 不做规范化）。其他行不解转义；正文中未经转义的 `From ` 行按分隔行处理，操作者须提供符合本子集的文件。
+
+解码后的邮件字节才是现有 MIME 解析、原始载荷与 `source_sha256` 的输入，仍受单封 2,000,000 字节上限。台账另对每条记录保存包含 envelope 的整个原始字节范围 `[start,end)` 的 `record_sha256`，两类摘要口径不同、不得混用。空文件合法；未完成的尾记录不占本次 limit、不占台账序号、不是隔离失败。
+
+## 来源身份、承诺前缀与续扫
+
+`source-id` 沿用工作台对象 ID 语法，大小写敏感，在一个 vault 内独立命名。FILE 必须是真实普通文件，拒绝符号链接；原路径与文件名不参与来源身份，文件可搬动后续扫。一次命令期间文件保持静止；只支持两次命令之间的追加，或对尚未承诺尾部的合法修改。
+
+台账对每个来源持久公开 `next_offset`、`pinned_bytes`、`pinned_sha256`、`sealed` 以及封口后的 `source_bytes`/`source_sha256`。`next_offset` 是下一待处理记录的 envelope 起点（封口且全部扫描后等于文件长度）。续扫先逐字节复核此前承诺的原始前缀，比较的是真实字节 SHA256，不比较文件长度、mtime、inode、Message-ID 或解码摘要；承诺范围包含用来证明上一条记录结束的下一条完整 envelope 分隔行——仅锁到上一条 `end` 而允许该分隔行被改成普通正文会改变已入档记录边界，必须拒绝。源缩短到承诺长度以下、承诺字节被改写，均整次失败且不推进台账；承诺范围以后的未处理正文允许重写后再扫。空前缀的摘要是空字节 SHA256；没有已处理记录时 `pinned_bytes` 可为 0。
+
+## scan 与封口语义
+
+`mbox-scan --db VAULT --source-id ID --source FILE [--limit N] [--seal]` 登记或续扫一个来源，本次最多处理 N 条完整记录，N 是 1..100 的非布尔整数，默认 100；admitted 与 unresolved 都计入 limit。按物理记录顺序分配连续正整数 `record_number`，不允许跳号或因重试重记。未封口时，即使最后一封已能被 MIME 解析，只要后面没有完整 envelope 分隔行就不处理它，等待后续追加。到达当前可处理边界而无新记录、且没有新封口时是成功 no-op。
+
+`--seal` 是操作者声明来源不再追加：本次把当前完整文件长度与原始 SHA256 一起持久绑定，此后包括未扫描部分在内全部不可变，`pinned_bytes`/`pinned_sha256` 随之成为整文件的长度与摘要；封口后的 FILE 必须与保存的全文件身份完全相同，任何追加都拒绝。封口让最后一条以 EOF 结束的记录可处理，但不绕过 limit，可分多次继续扫这份已固定文件。首次封口与本次入档、隔离和进度在同一事务成功或一起回滚；重复 `--seal` 不重新封口。空文件可封口并最终结案；非空文件若末尾只有没有 LF 的未完成 envelope 行（其行首仍可能成为 `From ` 前缀），不能封口，整次失败；最后一封邮件内容本身可以没有末尾 LF。
+
+## 逐记录处置与隔离优先级
+
+每条完整记录保存连续 `record_number`、原始范围、`record_sha256` 与固定结果。可隔离的单记录业务问题按优先级依次为 `oversize`、`invalid_mail`、`identity_conflict`、`reply_cycle`，台账写 `status=unresolved` 与 reason 后继续处理后面的完整记录。oversize 也必须完整跨过这条原始记录（原始范围与摘要照常落账），不能截取前 2MB 伪装合法邮件；坏记录不留下任何身份、线程改动、附件、FTS 或载荷，联合父图检查在插入后发现环时也撤回该记录的全部尝试。源读取失败、数据库错误、磁盘错误等环境故障不吞成隔离：整次命令失败，本次较早的合法记录、隔离记录、前缀、封口与恢复水位均不部分提交——一次 scan 是单个事务，不是每条记录各自提交。
+
+解码后单封沿用现有 MIME、Date、Message-ID、附件摘要与单父链语义。相同 Message-ID 且相同解码邮件 SHA256 允许在本来源重复出现，每个物理记录各留台账但只入档一次；与 live 同字节记 `unchanged_live`，与 purged 同字节记 `ignored_purged` 且绝不复活载荷，新身份记 `inserted`。三种成功记录 status 均为 `admitted`，admission 保存具体分类。同 ID 不同字节记 `identity_conflict`；与存量或本次较早记录构成回复环记 `reply_cycle`，该记录不入档。迟到父邮件真正入档后，现有回复按完整图重新归根，当前保全覆盖随之改变；原清除计划仍按原规则重查当前覆盖，不为本接入模式绕行。扫描与处置不自动登记保全，不伪造 custodian、package 或 value，不改既有 collection 收据与 provenance 形状。
+
+## 人工处置（mbox-resolve）
+
+DECISION 是沿用项目重复键拒绝、非有限值拒绝与 8MB 防护的严格 JSON。补正对象恰含 `source_id`、`record_number`、`record_sha256`、`action`、`reason`、`replacement`，`action` 为 `replace`；豁免对象恰含前五项，`action` 为 `waive`。`record_number` 是非布尔正整数；摘要为 64 位小写十六进制，必须同时匹配该来源的那条隔离记录，不能拿另一来源的同序号代替。`reason` 是 1..2000 Unicode 码点且含非空白字符的字符串，原样保存。`replacement` 是真实、非符号链接的 `.eml` 普通文件，相对路径以 DECISION 所在目录为准；它是未经 mboxrd 包装的完整邮件，按已有单封限制与 MIME 规则验证。
+
+补正不要求新邮件字节等于原坏记录，但必须同时保留原 `record_sha256`、补正原始 SHA256（`replacement_sha256`）、最终 Message-ID 与理由，凭据不能冒称原坏记录已原样入档；无需重读原 mbox，也不能覆盖原字节范围或摘要。补正作为整体通过当前 vault 的身份与父图检查后再完成处置：新邮件入档或同字节重送的分类与扫描一致，相同身份已 purged 时只确认身份不恢复。补正失败保持 unresolved、不留载荷与半次处置。豁免不入档任何邮件，仅把缺口标为 `waived`。成功补正 status 为 `replaced`，admission 保存该次补正实际的 inserted/unchanged_live/ignored_purged 分类；原扫描直接成功的为 `admitted`。首次补正或豁免与其成功收据在同一事务提交。已处置记录不得改决定；完全相同决定重送先返回原收据（补正重送仍读取并验证 replacement 的真实字节，以字节摘要、action、原样 reason 与原记录身份组成请求身份，文件名与路径不参与；豁免无需文件），该短路优先于邮件当前 live/purged 状态。原 admitted 记录不能用 resolve 改写。环境故障同样整次回滚。
+
+## 凭据（mbox-certify）与只读视图（mbox-show）
+
+只有来源已封口、`next_offset` 到达封口长度且没有 unresolved 记录时才能成功；单纯扫描至 EOF、仍有未扫完整记录或只有“坏记录已跳过”都拒绝，不得输出貌似完整的成功凭据。凭据恰含 `vault`、`source_id`、`source_bytes`、`source_sha256`、`records`；records 按 record_number 排序，逐项给 record_number、start、end、record_sha256、最终 status，以及 admitted/replaced 的 message_id、message_sha256、admission 和 replaced/waived 的 reason；replaced 另有 replacement_sha256，waived 不带邮件身份。空来源 records 为 `[]`。凭据证明固定原始邮箱的每条物理记录都已入档、补正或明确豁免，不证明没有豁免，也不证明邮件以后仍有载荷。成功后永远返回首次冻结凭据；后来的保全、清除、来源目录删除不能重算、失效或改分类，台账不复制邮件正文作为凭据备份。
+
+`mbox-show` 只读返回恰含 `vault`、`source_id`、`next_offset`、`pinned_bytes`、`pinned_sha256`、`sealed`、`source_bytes`、`source_sha256`、`records`、`certificate` 的对象；未封口时 source_bytes/source_sha256 为 null，证书未创建时 certificate 为 null。records 按序列出公共记录身份与 status，unresolved 项给 reason，replaced/waived 项另保留 `initial_reason` 追溯首次隔离原因（证书记录不含该字段）。scan 成功返回同一最新 show 形状，resolve 返回对应最终记录对象，certify 返回凭据。所有输出都不含原邮件、主题、发件人、附件描述、原 envelope、解码正文、源文件路径或替换文件路径。查询与证书可脱离原文件再次启动；未知 source-id 拒绝。清除仍只清除原邮件载荷，不丢失台账身份，也不会从源路径或替换文件偷偷加载回来。
+
+## 有界内存与失败语义
+
+不对整个 mbox 套用 40MB 上限，也不把全文件或一条无限长坏记录读入内存。源字节以固定大小分块流式读取，内存中的源字节工作集有固定上界，与邮箱总长、已扫描前缀长度和超限记录长度无关；可正常持有当前合法单封（≤2MB）及现有业务元数据。超限记录在解码累计到达上限后继续流式读完并计算原始摘要，不保留多余字节。
+
+所有变更经 vault 的单一事务提交点：已启用恢复跟踪的正常源上，一次 scan/resolve/首次 certify 若确实改变持久业务，revision 在同一提交恰增加 1；一次 scan 处理多条也只加 1。no-op、原决定重送、重复 certify、失败与 show 不增加；新来源首次登记（含空来源）是业务变化。未启用跟踪的 vault 可直接使用本功能。
+
+## 恢复扩展
+
+检查点格式在原六键结构不变的前提下扩展 `tables`：新增 `vault_mbox_sources`、`vault_mbox_records`、`vault_mbox_certificates` 三张逻辑表，列集合固定并随恢复校验不变量（封口状态、范围、摘要、status/reason/admission 取值、证书只引用封口来源等）。旧格式检查点不含这三张表，恢复时按空台账处理并继续按原契约恢复，不拒绝、不重签旧文件；未使用本功能的旧 vault/旧检查点不因缺表变成错误。完整检查点保存进度、承诺前缀、封口、隔离与处置、首次凭据，不保存外部源文件。恢复后 show 展示检查点时点的台账与凭据，后来才入档/处置/封口的记录不注入；权威清单抑制载荷不改写历史入档分类，凭据不因载荷被抑制而重算。recovered 副本仅允许 `mbox-show`；`mbox-scan`、`mbox-resolve`、`mbox-certify` 三个变更入口（含真实成功重送）在 CLI 与库函数层面都先拒绝。沿用抑制载荷不得回写恢复输出或暂存文件的原约束。
+
+成功退出 0；结构、路径、来源身份、补正冲突、结案条件、只读限制或环境故障退出 2。可隔离的坏记录是 scan 的正常成功结果。失败保留上次完整可读状态，首次建表也不留下半次台账。

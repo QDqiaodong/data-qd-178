@@ -2,7 +2,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from . import vault, review, collection, recovery
+from . import vault, review, collection, recovery, mbox
 from .archive import build, search, thread
 
 
@@ -88,6 +88,21 @@ def main():
     rrestore.add_argument("--authority-sha256", required=True)
     rrestore.add_argument("--min-revision", required=True)
     rrestore.add_argument("--db", required=True)
+    mscan = commands.add_parser("mbox-scan")
+    mscan.add_argument("--db", required=True)
+    mscan.add_argument("--source-id", required=True)
+    mscan.add_argument("--source", required=True)
+    mscan.add_argument("--limit", type=int, default=mbox.DEFAULT_LIMIT)
+    mscan.add_argument("--seal", action="store_true")
+    mshow = commands.add_parser("mbox-show")
+    mshow.add_argument("--db", required=True)
+    mshow.add_argument("--source-id", required=True)
+    mresolve = commands.add_parser("mbox-resolve")
+    mresolve.add_argument("--db", required=True)
+    mresolve.add_argument("--decision", required=True)
+    mcert = commands.add_parser("mbox-certify")
+    mcert.add_argument("--db", required=True)
+    mcert.add_argument("--source-id", required=True)
     args = p.parse_args()
     try:
         if args.command == "import":
@@ -140,6 +155,15 @@ def main():
                 args.checkpoint, args.checkpoint_sha256, args.authority,
                 args.authority_sha256, recovery.parse_revision(args.min_revision),
                 args.db)
+        elif args.command == "mbox-scan":
+            result = mbox.mbox_scan(args.db, args.source_id, args.source,
+                                    limit=args.limit, seal=args.seal)
+        elif args.command == "mbox-show":
+            result = mbox.mbox_show(args.db, args.source_id)
+        elif args.command == "mbox-resolve":
+            result = mbox.mbox_resolve(args.db, args.decision)
+        elif args.command == "mbox-certify":
+            result = mbox.mbox_certify(args.db, args.source_id)
         else:
             result = vault.vault_thread(args.db, args.message_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))

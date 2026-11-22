@@ -30,6 +30,7 @@ from pathlib import Path
 from .parse import identifier
 from .review import REVIEW_SCHEMA
 from .collection import COLLECTION_SCHEMA
+from .mbox import MBOX_SCHEMA
 from .vault import (FORMAT as VAULT_FORMAT, INSTANT, OBJECT_ID, RECOVERY_SCHEMA,
                     SCHEMA as VAULT_SCHEMA, RecoveredVault, _open_vault,
                     _open_vault_readonly, _recovery_state, _vault_id)
@@ -72,6 +73,17 @@ TABLE_SPECS = (
     ("vault_collection_sources",
      ("intake_id", "package_id", "custodian", "value", "message_id",
       "source_sha256"), (), ("intake_id", "package_id", "message_id")),
+    # mboxrd intake ledger (format extension; absent in older checkpoint files)
+    ("vault_mbox_sources",
+     ("source_id", "next_offset", "pinned_bytes", "pinned_sha256", "sealed",
+      "sealed_bytes", "sealed_sha256"), (), ("source_id",)),
+    ("vault_mbox_records",
+     ("source_id", "record_number", "start_offset", "end_offset",
+      "record_sha256", "status", "reason", "initial_reason", "message_id",
+      "message_sha256", "admission", "replacement_sha256", "receipt"),
+     (), ("source_id", "record_number")),
+    ("vault_mbox_certificates",
+     ("source_id", "document"), (), ("source_id",)),
 )
 TABLE_NAMES = tuple(spec[0] for spec in TABLE_SPECS)
 
@@ -351,12 +363,24 @@ def authority(path, output):
 
 # ------------------------------------------------------------------ restore --
 
+# Logical tables added after the first checkpoint format.  An older checkpoint
+# file simply does not contain them; restore treats them as empty ledgers and
+# never rejects the old file for their absence.
+OPTIONAL_TABLE_NAMES = frozenset((
+    "vault_mbox_sources", "vault_mbox_records", "vault_mbox_certificates"))
+
+
 def _checkpoint_tables(value):
-    if not isinstance(value, dict) or set(value) != set(TABLE_NAMES):
+    if not isinstance(value, dict):
+        raise ValueError("checkpoint tables do not match the format")
+    missing = set(TABLE_NAMES) - set(value)
+    if missing - OPTIONAL_TABLE_NAMES:
         raise ValueError("checkpoint tables do not match the format")
     result = {}
     for name, columns, blob_columns, _order in TABLE_SPECS:
-        table = value[name]
+        table = value.get(name)
+        if table is None:  # older checkpoint written before this ledger existed
+            table = {"columns": list(columns), "blob_columns": [], "rows": []}
         _exact_keys(table, ("columns", "blob_columns", "rows"),
                     f"checkpoint.tables.{name}")
         if table["columns"] != list(columns):
@@ -561,6 +585,85 @@ def _validate_checkpoint(document):
         _plain_int(row["value"], "collection source value")
         _exact_identifier(row["message_id"], "collection source message id")
         _check_digest(row["source_sha256"], "collection source sha256")
+
+    mbox_sources = {row["source_id"]: row for row in tables["vault_mbox_sources"]}
+    for source_id, row in mbox_sources.items():
+        _object_id(source_id, "mbox source id")
+        if row["source_id"] != source_id:
+            raise ValueError("mbox source row is malformed")
+        _plain_int(row["next_offset"], "mbox next_offset")
+        _plain_int(row["pinned_bytes"], "mbox pinned_bytes")
+        _check_digest(row["pinned_sha256"], "mbox pinned_sha256")
+        if row["sealed"] not in (0, 1):
+            raise ValueError("mbox sealed flag must be 0 or 1")
+        if row["sealed"]:
+            _plain_int(row["sealed_bytes"], "mbox sealed_bytes")
+            _check_digest(row["sealed_sha256"], "mbox sealed_sha256")
+            if row["pinned_bytes"] != row["sealed_bytes"] \
+                    or row["pinned_sha256"] != row["sealed_sha256"]:
+                raise ValueError("sealed mbox source must pin the whole file")
+        elif row["sealed_bytes"] is not None or row["sealed_sha256"] is not None:
+            raise ValueError("unsealed mbox source must not carry a file identity")
+    mbox_records = set()
+    for row in tables["vault_mbox_records"]:
+        source_id = row["source_id"]
+        if source_id not in mbox_sources:
+            raise ValueError("mbox record references an unknown source")
+        _object_id(source_id, "mbox record source id")
+        _plain_int(row["record_number"], "mbox record_number")
+        key = (source_id, row["record_number"])
+        if key in mbox_records:
+            raise ValueError("checkpoint has a duplicate mbox record")
+        mbox_records.add(key)
+        _plain_int(row["start_offset"], "mbox start_offset")
+        _plain_int(row["end_offset"], "mbox end_offset")
+        if row["end_offset"] <= row["start_offset"]:
+            raise ValueError("mbox record range must be nonempty")
+        _check_digest(row["record_sha256"], "mbox record_sha256")
+        if row["status"] not in ("admitted", "unresolved", "replaced", "waived"):
+            raise ValueError("mbox record has an invalid status")
+        if row["status"] == "unresolved":
+            if row["reason"] not in ("oversize", "invalid_mail",
+                                     "identity_conflict", "reply_cycle"):
+                raise ValueError("mbox unresolved reason is invalid")
+            if row["initial_reason"] != row["reason"]:
+                raise ValueError("unresolved mbox record reason mismatch")
+            if row["receipt"] is not None:
+                raise ValueError("unresolved mbox record must not carry a receipt")
+            if row["message_id"] is not None or row["admission"] is not None:
+                raise ValueError("unresolved mbox record must not carry an identity")
+        if row["status"] in ("admitted", "replaced"):
+            _exact_identifier(row["message_id"], "mbox record message id")
+            _check_digest(row["message_sha256"], "mbox record message_sha256")
+            if row["admission"] not in ("inserted", "unchanged_live",
+                                        "ignored_purged"):
+                raise ValueError("mbox admission classification is invalid")
+        if row["status"] in ("replaced", "waived"):
+            if not isinstance(row["reason"], str) or not row["reason"].strip():
+                raise ValueError("resolved mbox record must keep a reason")
+            if row["initial_reason"] not in ("oversize", "invalid_mail",
+                                             "identity_conflict", "reply_cycle"):
+                raise ValueError("mbox initial_reason is invalid")
+            if not isinstance(row["receipt"], str) or not row["receipt"]:
+                raise ValueError("resolved mbox record must keep its receipt")
+        elif row["receipt"] is not None:
+            raise ValueError("open mbox record must not carry a receipt")
+        if row["status"] == "replaced":
+            _check_digest(row["replacement_sha256"], "mbox replacement_sha256")
+        elif row["replacement_sha256"] is not None:
+            raise ValueError("only replaced mbox records carry a replacement digest")
+        if row["status"] == "admitted" and row["initial_reason"] is not None:
+            raise ValueError("admitted mbox record must not carry an initial_reason")
+        if row["status"] == "waived" and (row["message_id"] is not None
+                                          or row["admission"] is not None):
+            raise ValueError("waived mbox record must not carry a mail identity")
+    for row in tables["vault_mbox_certificates"]:
+        if row["source_id"] not in mbox_sources:
+            raise ValueError("mbox certificate references an unknown source")
+        if not mbox_sources[row["source_id"]]["sealed"]:
+            raise ValueError("mbox certificate exists for an unsealed source")
+        if not isinstance(row["document"], str):
+            raise ValueError("mbox certificate document must be a string")
     return document, tables, messages
 
 
@@ -641,6 +744,7 @@ def _build_database(temp, tables, checkpoint_revision, suppressed, stream,
         db.executescript(VAULT_SCHEMA)
         db.executescript(REVIEW_SCHEMA)
         db.executescript(COLLECTION_SCHEMA)
+        db.executescript(MBOX_SCHEMA)
         db.execute(RECOVERY_STATE_DDL)
 
         _insert_rows(db, "vault_meta", ("key", "value"), tables["vault_meta"])
