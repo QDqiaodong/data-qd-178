@@ -1,0 +1,11 @@
+{
+  "intake_id": "RECOVERY-COLLECT",
+  "packages": [
+    {
+      "package_id": "PKG-M",
+      "custodian": "CUST-M",
+      "value": 9,
+      "source": "package"
+    }
+  ]
+}

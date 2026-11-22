@@ -20,7 +20,7 @@ from pathlib import Path
 from . import io as jsonio
 from .parse import identifier, read_folder
 from .vault import (_ingest_messages, _object_id, _open_vault_readonly,
-                    _transact, _vault_id)
+                    _transact, _vault_id, refuse_if_recovered)
 
 MAX_PACKAGES = 18
 MAX_PACKAGE_FILES = 200
@@ -425,6 +425,7 @@ def _stored_intake(db, intake_id):
 
 
 def collection_import(db_path, manifest_path):
+    refuse_if_recovered(db_path)
     intake_id, packages, request = _load_manifest(manifest_path)
 
     def operation(db):

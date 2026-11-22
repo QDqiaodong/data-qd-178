@@ -17,7 +17,8 @@ from pathlib import Path
 
 from . import io as jsonio
 from .parse import identifier
-from .vault import _object_id, _open_vault_readonly, _transact
+from .vault import (_object_id, _open_vault_readonly, _transact,
+                    refuse_if_recovered)
 
 FORMAT = "mailroom-review-1"
 MARKER = "[REDACTED]"
@@ -253,6 +254,7 @@ def _parse_spec(spec):
 
 
 def review_open(db_path, spec_path):
+    refuse_if_recovered(db_path)
     spec = jsonio.load(spec_path)
     review_id, parsed = _parse_spec(spec)
 
@@ -416,6 +418,7 @@ def _feedback_canonical(feedback):
 
 
 def review_return(db_path, review_id, package_path, feedback_path):
+    refuse_if_recovered(db_path)
     _object_id(review_id, "review_id")
     package = jsonio.load(package_path)
     feedback = jsonio.load(feedback_path)

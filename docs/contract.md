@@ -144,3 +144,82 @@ MANIFEST 是严格 JSON 对象，恰含 `intake_id` 与 `packages`，不接受�
 ## 事务与失败语义
 
 新表按需加入已有 vault，不要求重导邮件；失败不能留下部分建表或半次入档。成功退出 0；无效输入、源读取、数据库错误或 intake 身份冲突退出 2；单个包业务上无法入选是正常核对结果，不是整个命令失败。载荷、附件、FTS、线程、来源条目和收据在同一次完整提交中落库；成功输出丢失可重试（返回首次收据），提交前失败可以修复环境后重投。不修改或重签已有外审交付件和原收据。
+
+# 离线灾备取证恢复（recovery-*）
+
+本节在既有 vault 之上增加离线灾备：事故前由管理员为正常源 vault 定期保存自包含检查点并导出清除权威清单；事故后即使原 vault 与全部邮件目录都已丢失，也能凭两份离线材料重建当时的业务记录，供调查人员只读回看。恢复副本只用于历史取证，不继续接收新业务，并在较新的合法清除事实下抑制相应载荷。
+
+只使用 Python 标准库；不联网、不并发写、不做密码学签名、不自动寻找“最新”文件。v1 档案、缺失库与恢复副本上的 `recovery-enable`，以及未开启跟踪的正常 vault 上除 `recovery-enable` 外的全部新命令，一律退出 2 且不修改数据库。原 v1、正常源 vault、审阅与采集的全部既有接口和业务语义保持不变；未开启恢复跟踪的 vault 行为与加入本功能前完全一致。
+
+## 身份与水位（recovery-enable / recovery-info）
+
+`recovery-enable --db VAULT` 为一个已有正常 vault 开启恢复跟踪：在同一次提交中增加本功能自己的持久状态表，写入一个新的随机持久 `stream` 身份，并把当前完整已提交状态记为 `revision` 0。原 `vault` 身份不变，不要求重导入、重建或改写任何当前业务记录。对已开启的 vault 重试返回原身份与当前水位，不重新归零；开启操作不改变业务状态，因此不推进水位（仍为 0）。
+
+开启后，每一次现有变更操作（`vault-ingest`、`vault-init` 之后的摄取、`hold-add`/`hold-release`、`retention-plan`/`retention-apply`、`review-open`/`review-return`、`collection-import` 等业务变更）若确实改变了业务持久状态，必须在**同一次 SQLite 提交**中把 `revision` 恰增加 1。一次操作改动很多行也仍只加 1。判定依据是事务内对已提交逻辑业务表的完整摘要比对，而不是进程内计数器，因此：
+
+- 全部失败并回滚的操作、纯查询、导出文件、相同身份的成功重送（摄取重送、同计划重试、同保全重登记、审阅/采集的等价重试、已执行计划的收据重放等）都不改变业务状态，不推进水位；
+- 空清除计划、首次接受空选包结果的采集、记录空收据的首次成功清除都是真实的新业务记录，都推进 1；
+- 跟踪表自身的维护（enable、恢复副本的状态持久化）不属于业务状态，不递归计数；
+- 该规则在 `vault._transact` 这一所有变更函数共用的提交点上实施，CLI 与既有 Python 调用（`vault.*`、`review.*`、`collection.*`）语义一致，不依赖进程内计数或逐个 CLI 覆盖。
+
+`recovery-info --db VAULT` 只读返回恢复身份、当前水位与恢复来源，不建表、不推进水位、不重写数据库。
+
+## 检查点（recovery-checkpoint）
+
+`recovery-checkpoint --db VAULT --output FILE` 从一个一致的已提交业务状态（只读快照）生成一个自包含检查点并发布到新路径。文件是确定性的紧凑、键排序、无尾随换行的 UTF-8 JSON，格式为：
+
+```
+{"format":"mailroom-recovery-checkpoint-1",
+ "vault":"<持久 vault 身份>","stream":"<持久 stream 身份>",
+ "revision":<非负整数水位>,
+ "tables":{ "<逻辑表名>": {"columns":[...],"blob_columns":[...],"rows":[[...],...]}, ... },
+ "checksum":"<对除 checksum 外整个对象的规范化编码的 SHA256>"}
+```
+
+`tables` 恰含复原所需的全部当前逻辑记录，按固定表名与列集合：`vault_meta`；`vault_messages`（live/purged 身份、父链、线程、状态、live 载荷与原始 bytes、源摘要）；`vault_attachments`（附件描述）；`vault_holds`（保全及其解除状态）；`vault_plans`（冻结计划文档）与 `vault_receipts`（已存在的执行收据）；`vault_review_batches`/`vault_review_items`/`vault_review_annotations`/`vault_review_receipts`（审阅批次、公开编号、坐标、摘要、意见与回收收据）；`vault_collection_intakes`/`vault_collection_sources`（采集来源、规范请求与首次收据）。未使用的审阅或采集表在检查点里以空 `rows` 出现，因此空业务状态不会变成缺表错误。BLOB（原始邮件 bytes）以 base64 编码。FTS 索引不保存，恢复时由保留的 live 载荷重建。检查点不保存捕获前已经清除的源载荷，也不把 SQLite 空闲页、旧 FTS 段或 journal 残留当作逻辑记录。
+
+格式校验：根对象必须恰含上述六个键；`format`、`vault`、`stream`、`revision`、`tables`、`checksum` 类型与取值严格；`checksum` 必须与内容一致；每张表必须恰含 `columns`/`blob_columns`/`rows`，列集合必须与格式固定集合完全一致（拒绝放大或伪造列）；purged 身份不得带载荷，live 身份必须有正文与原始 bytes；父/线程/Message-ID 语法、状态、摘要、附件引用、计划-收据约束、审阅/采集外键等业务不变量都会被校验。文件是否有效只由内容、格式与校验和决定，绝不以文件名或后缀判定。检查点只能在正常源 vault 上生成；恢复副本上 `recovery-checkpoint` 退出 2，不产生任何输出。
+
+写出前先在内存中完整生成并以读者的同样规则校验，随后统计完整文件字节数，超过 512,000,000 字节则退出 2 且不发布；校验通过后才以同目录临时文件+硬链接发布到原本不存在的路径（包括拒绝悬空符号链接）。成功 stdout 为恰含 `vault`、`stream`、`revision`、`sha256`、`bytes` 的对象，`sha256`/`bytes` 是实际已发布文件的摘要与字节数。
+
+## 清除权威清单（recovery-authority）
+
+`recovery-authority --db VAULT --output AUTHORITY.json` 从正常源 vault 的一个一致已提交状态导出清除权威清单。清单是严格 JSON 对象，恰含 `format`、`vault`、`stream`、`revision`、`purged`：`format` 固定 `mailroom-recovery-authority-1`；`vault`/`stream` 是正常源 vault 的持久身份；`revision` 是同一已提交状态的非负整数水位；`purged` 是该状态下全部 `purged` 身份，按 Message-ID 排序，每项恰含 `message_id` 与 `source_sha256`。没有清除身份时仍输出对象且 `purged` 为 `[]`。
+
+校验拒绝重复身份、未排序、额外字段、布尔或非整数水位、非法 ID 或非 64 位小写十六进制摘要；沿用既有的重复键拒绝、`NaN/Infinity/-Infinity` 拒绝与 8 MB JSON 防护。文件按 `json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)` 的 UTF-8 字节编码，无尾随换行。生成端也检查完整文件不超过 8,000,000 字节，超限退出 2 且不发布；先完整生成并在内存校验后才以同目录临时文件+硬链接发布到新路径。成功 stdout 为恰含 `vault`、`stream`、`revision`、`sha256`、`purged_count` 的对象。
+
+清单只含清除身份与源摘要，绝不含原始邮件、正文、主题、发件人、附件描述或意见文本。一次成功清除与其清除事实、水位推进及首次执行收据在同一事务提交，因此清单只会发布整次清除后的完整状态，不会公布半次清除；已执行清除的重送不推进水位、不改清单。
+
+## 信任边界与外部摘要
+
+正常源 vault 中已成功提交的清除是权威事实，`recovery-authority` 负责把它导出。操作者负责在事故前妥善保存最新一份合格清单，并在恢复时从可信事故记录取得两份文件的准确 SHA256 及要求的最小 `revision`。
+
+`recovery-restore` 的两个 `--*-sha256` 参数都是对应文件**原始字节**的 SHA256（64 位小写十六进制），属于外部信任输入，不能用文件内自报摘要代替：程序对实际读入的字节计算 SHA256 并与参数比对。`--min-revision N` 是非负十进制整数，表示操作者已知必须覆盖的源水位。程序要求清单 `revision` 同时不小于 `N` 和检查点 `revision`，且 `vault`、`stream` 与检查点相同；缺失材料、文件摘要不符、异源（vault 或 stream 不同）、水位不足均退出 2。文件的键顺序或空白变化不改变业务结构，但会改变外部文件摘要，必须按实际提交字节核验。
+
+清单若漏掉检查点中已经 purged 的身份，或与检查点同 ID 的 `source_sha256` 不同，整次拒绝。对清单中检查点里还没有的身份（事故后较晚创建或较晚清除），只核其结构与摘要格式，不凭空加入恢复库。相同 `vault`/`stream` 且相同 `revision` 声称同一已提交状态，此时清单的 purged 身份及摘要集合必须与检查点完全一致；不能把同水位下额外声明的清除当作将来事实接受。
+
+软件不能仅凭水位与文件自身证明它在现实中全局最新：若某次清除在提交后、导出清单前就丢失了源库，旧清单不包含这次事实，程序无法发现不可见的事实。操作者不能把旧清单声明为最新后要求软件自行发现。缺少合格的可信材料时应停止恢复；本功能**不提供**忽略清单、降低水位或从检查点自造权威的兜底模式。原检查点文件、已交付的外部文件与其他离线副本不在本功能撤回或物理擦除范围内。
+
+## 恢复（recovery-restore）
+
+`recovery-restore --checkpoint FILE --checkpoint-sha256 HASH --authority AUTHORITY.json --authority-sha256 HASH --min-revision N --db NEW_VAULT` 核验两份离线材料后，恢复到原本不存在的新路径；目标已存在（含悬空符号链接）退出 2。
+
+恢复以检查点时点为业务可见边界，再叠加权威清除：
+
+- 检查点原有的 purged 身份保持 purged；
+- 检查点时 live、且在清单里的身份改为 purged：移除其原始 bytes、主题、发件人、正文、全部附件描述与 FTS，保留原 Message-ID、`parent_id`、`thread_id`、`sent_at`、`source_sha256`（父图保持连通，后代不断链）；
+- 没有被清单清除的 live 身份保留完整原载荷；
+- 清单中的未来身份、后来才创建的保全/计划/执行收据/意见/来源/邮件都不能注入。例如某邮件在检查点后清除，本次不会伪造一条“检查点时已执行”的旧计划收据；
+- 检查点已有的计划、收据、审阅与来源事实原样保留，即使其中某些邮件现被抑制。历史意见 `comment` 由审阅者主动提交、可能自行引文，按既有契约原样保留；不据此猜测或重建正文，也不自动删改用户意见。
+
+恢复不先把旧检查点原样复制成磁盘数据库再清除：在通过可信清单确认需要抑制后，被抑制邮件的源载荷与派生索引内容不会被新写入目标文件、临时文件、磁盘临时库、journal、WAL 或 FTS 残留页（失败路径同样如此）。实现上，恢复在一个同目录临时数据库中**只插入允许保留的记录**：被抑制身份在插入前即改写成 purged 无载荷行，附件行与 FTS 行从不写入。读取原检查点、核验其内容与构建新库都在同一进程内完成；操作系统交换区、原备份文件与外部快照不在本要求范围。最终库由允许保留的记录构成，不以改 `status`、隐藏查询或 `DELETE` 后留自由页代替该约束。普通 live 邮件与保留的 comment 偶然含相同字符不算违规。
+
+恢复库建成后，同一事务写入持久 `recovered` 标记与来源：`vault` 身份与 `stream` 不变，`revision` 表示检查点水位，另持久记录检查点与清单的实际文件 SHA256、清单水位、排序后的 `suppressed`（只列本次由检查点 live 改成 purged 的 ID，原本 purged 的不重复列）。数据、FTS 与 `recovered` 锁全部持久化并被重新读取核验后，才以硬链接发布到新路径。恢复副本可脱离全部输入文件再次启动，继续支持只读的 `vault-search`、`vault-thread`、`retention-show`、`review-notes`、`collection-show`、`vault-provenance` 与 `recovery-info`，返回值沿用旧接口；历史计划/收据不因抑制而重算，purged 节点保持父图连通，notes/provenance 仍可见。`review-export` 在副本上是“读取已登记源并向新文件交付”，允许运行，但任一来源被抑制仍按既有规则整批失败且无交付文件；全部来源仍 live 时字节与原登记一致。
+
+副本永久标记为 `recovered`，正常源为 `source`。副本禁止全部数据库变更入口，包括 `vault-ingest`、`hold-add`/`hold-release`、`retention-plan`/`retention-apply`、`review-open`/`review-return`、`collection-import`、`recovery-enable`；即使请求是之前成功操作的真实重送，也先因 `recovered` 拒绝，不能返回成功收据后绕过只读模式。该限制在 `vault._transact` 与各自入口共同实施，覆盖 CLI 与既有库函数。副本也不能再导出 `recovery-checkpoint` 或 `recovery-authority`，以免成为看似正常的权威来源；`retention-show` 仍可查看已有成功收据。只读命令不触发任何懒建表、水位更新或数据库重写，空结果保持原接口形状（如 `review-notes`/`vault-provenance` 的空数组、`retention-show` 的 `receipt: null`）。
+
+## 输出与失败语义
+
+新命令所有成功 stdout 均为一个 JSON 对象：`recovery-enable`、`recovery-info`、`recovery-restore` 使用恰含 `mode`、`vault`、`stream`、`revision`、`checkpoint_sha256`、`authority_sha256`、`authority_revision`、`suppressed` 的对象——`source` 模式下后三个摘要/清单水位字段为 `null`、`suppressed` 为 `[]`；`recovered` 模式填写持久来源，数组为空时也保留。原命令输出形状不变。
+
+检查点/清单完整生成核验后才发布到新路径；恢复库完整建成、数据与索引核验完成且 `recovered` 锁已持久化后才发布。失败不留下可误认成功的输出或本次临时文件，不改源库、输入备份或已有目标；成功输出丢失后可用新输出路径重试（不要求覆盖旧文件）。所有成功退出 0，格式/路径/来源/水位/身份/只读限制或数据库错误退出 2。无需抵御操作者手工改库或自行移除锁。

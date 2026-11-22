@@ -5,6 +5,7 @@ are rejected without modification and vice versa. Every mutation runs in one
 transaction, so a failed command leaves the last complete readable state.
 """
 import json
+import hashlib
 import os
 import re
 import sqlite3
@@ -46,6 +47,24 @@ CREATE TABLE vault_receipts (
 CREATE INDEX vault_thread_members ON vault_messages(thread_id,sent_at,id);
 """
 
+# Recovery tracking lives beside the business tables.  The state row is written
+# by ``recovery-enable`` and is afterwards maintained by the same transaction
+# helper that runs every business mutation.  It is deliberately absent from a
+# vault that never enabled recovery, so all existing commands keep their exact
+# observable behaviour.
+RECOVERY_SCHEMA = """
+CREATE TABLE IF NOT EXISTS vault_recovery_state (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ stream_id TEXT NOT NULL,
+ revision INTEGER NOT NULL,
+ mode TEXT NOT NULL CHECK(mode IN ('source','recovered')),
+ checkpoint_sha256 TEXT,
+ authority_sha256 TEXT,
+ authority_revision INTEGER,
+ suppressed TEXT NOT NULL
+);
+"""
+
 OBJECT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 INSTANT = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,6})?(Z|[+-]\d{2}:\d{2})")
 
@@ -56,6 +75,13 @@ class HoldBlocked(Exception):
     def __init__(self, blocked):
         super().__init__("retention plan blocked by active holds")
         self.blocked = blocked
+
+
+class RecoveredVault(ValueError):
+    """A recovered copy is a read-only historical exhibit and refuses mutation."""
+
+    def __init__(self):
+        super().__init__("recovered vault is read-only")
 
 
 def _object_id(value, label):
@@ -110,12 +136,60 @@ def _open_vault_readonly(path):
     return db
 
 
+def refuse_if_recovered(path):
+    """Fail fast on a recovered copy before any caller reads external inputs.
+
+    The authoritative check still happens inside the write transaction; this
+    only makes 'recovered is read-only' win over input parsing errors so a true
+    replay of a former success can never be mistaken for a normal failure path
+    that reads files first.  Missing or foreign databases are left to their
+    ordinary error handling.
+    """
+    try:
+        db = _open_vault_readonly(path)
+    except (OSError, ValueError, sqlite3.Error):
+        return
+    try:
+        state = _recovery_state(db)
+    finally:
+        db.close()
+    if state is not None and state["mode"] == "recovered":
+        raise RecoveredVault()
+
+
 def _transact(path, operation):
-    """Run operation(db) inside one immediate transaction; all or nothing."""
+    """Run operation(db) inside one immediate transaction; all or nothing.
+
+    This is the single choke point for every business mutation (vault, review
+    and collection modules all call it), so it owns two cross-cutting rules:
+
+    * a recovered copy is read-only and refuses before the operation runs;
+    * when recovery tracking is enabled, exactly one revision step is recorded
+      in the same SQLite commit iff the committed business state really
+      changed.  The comparison is a digest of the persisted logical business
+      tables taken inside the transaction, not an in-process counter, so
+      no-op replays, queries and failed work never advance the watermark.
+    """
     db = _open_vault(path)
     try:
         db.execute("BEGIN IMMEDIATE")
+        state = _recovery_state(db)
+        if state is not None and state["mode"] == "recovered":
+            raise RecoveredVault()
+        before = _business_fingerprint(db) if state is not None else None
         result = operation(db)
+        after = _business_fingerprint(db) if state is not None else None
+        after_state = _recovery_state(db)
+        if state is not None:
+            if after_state is None:
+                raise ValueError("recovery state disappeared during a mutation")
+            if after_state["mode"] != "source":
+                raise RecoveredVault()
+            if before != after:
+                db.execute("UPDATE vault_recovery_state "
+                           "SET revision=revision+1 WHERE singleton=1")
+        elif after_state is not None:
+            raise ValueError("recovery tracking changed during an untracked mutation")
         db.commit()
         return result
     except BaseException:
@@ -127,6 +201,63 @@ def _transact(path, operation):
 
 def _vault_id(db):
     return db.execute("SELECT value FROM vault_meta WHERE key='vault_id'").fetchone()[0]
+
+
+_RECOVERY_STATE_COLUMNS = ("stream_id", "revision", "mode", "checkpoint_sha256",
+                           "authority_sha256", "authority_revision", "suppressed")
+
+
+def _recovery_state(db):
+    """Stored recovery row, or None when tracking was never enabled."""
+    exists = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='vault_recovery_state'"
+    ).fetchone()
+    if exists is None:
+        return None
+    row = db.execute("SELECT * FROM vault_recovery_state WHERE singleton=1").fetchone()
+    if row is None:
+        return None
+    return {key: row[key] for key in _RECOVERY_STATE_COLUMNS}
+
+
+def _business_tables(db):
+    """Logical business tables; virtual/FTS shadow tables are rebuildable."""
+    return [row["name"] for row in db.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'vault\\_%' ESCAPE '\\' "
+        "ORDER BY name")
+        if row["name"] != "vault_recovery_state"
+        and not row["name"].startswith("vault_search")]
+
+
+def _business_fingerprint(db):
+    """Digest of the complete committed logical business state.
+
+    Row order is fixed (rowid / primary key order) and every value carries a
+    type tag and length, so equal digests mean equal persisted business data.
+    Only tables that exist are covered; a vault that never used review or
+    collection simply contributes fewer tables.
+    """
+    digest = hashlib.sha256()
+    for name in _business_tables(db):
+        digest.update(b"T" + name.encode("utf-8") + b"\x00")
+        for row in db.execute(f'SELECT * FROM "{name}" ORDER BY rowid'):
+            for value in row:
+                if value is None:
+                    digest.update(b"N")
+                elif isinstance(value, bytes):
+                    digest.update(b"B" + str(len(value)).encode() + b":" + value)
+                elif isinstance(value, str):
+                    encoded = value.encode("utf-8")
+                    digest.update(b"S" + str(len(encoded)).encode() + b":" + encoded)
+                elif isinstance(value, int):
+                    digest.update(b"I" + str(value).encode())
+                elif isinstance(value, float):
+                    digest.update(b"F" + repr(value).encode())
+                else:  # defensive: sqlite3 only yields the types above
+                    raise ValueError(f"unsupported stored value type in {name}")
+            digest.update(b"\x01")
+        digest.update(b"\x02")
+    return digest.hexdigest()
 
 
 def _resolve_roots(graph):
@@ -246,11 +377,13 @@ def init(folder, target):
 
 def ingest(folder, path):
     """Transactionally ingest the next batch into an existing vault."""
+    refuse_if_recovered(path)
     messages = read_folder(folder)
     return _transact(path, lambda db: _ingest_messages(db, messages))
 
 
 def hold_add(path, hold_id, anchor):
+    refuse_if_recovered(path)
     _object_id(hold_id, "hold ID")
     anchor = identifier(anchor, "hold anchor")
 
@@ -270,6 +403,7 @@ def hold_add(path, hold_id, anchor):
 
 
 def hold_release(path, hold_id):
+    refuse_if_recovered(path)
     _object_id(hold_id, "hold ID")
 
     def operation(db):
@@ -286,6 +420,7 @@ def hold_release(path, hold_id):
 
 def retention_plan(path, plan_id, before):
     """Save an immutable purge plan; same ID + same instant returns the first."""
+    refuse_if_recovered(path)
     _object_id(plan_id, "plan ID")
     cutoff = parse_instant(before)
 
@@ -335,6 +470,7 @@ def retention_show(path, plan_id):
 
 def retention_apply(path, plan_id):
     """Execute the frozen plan once; replays return the first receipt as saved."""
+    refuse_if_recovered(path)
     _object_id(plan_id, "plan ID")
 
     def operation(db):

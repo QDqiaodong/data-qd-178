@@ -1,0 +1,9 @@
+{
+  "review_id": "RECOVERY-K",
+  "messages": [
+    {
+      "message_id": "<supplier@example.invalid>",
+      "redactions": []
+    }
+  ]
+}

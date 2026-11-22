@@ -1,0 +1,14 @@
+{
+  "review_id": "RECOVERY-M",
+  "package_sha256": "0039e8e13b63ed578cf0d0f4fe14f0008f9059482e4bbfe38192e9700d973964",
+  "return_id": "RETURN-M",
+  "annotations": [
+    {
+      "annotation_id": "NOTE-M",
+      "item_id": "M0001",
+      "start": 0,
+      "end": 5,
+      "comment": "Crane bracket quoted by reviewer."
+    }
+  ]
+}

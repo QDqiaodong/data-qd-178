@@ -2,7 +2,7 @@ import argparse
 import json
 import sqlite3
 import sys
-from . import vault, review, collection
+from . import vault, review, collection, recovery
 from .archive import build, search, thread
 
 
@@ -71,6 +71,23 @@ def main():
     vprov = commands.add_parser("vault-provenance")
     vprov.add_argument("--db", required=True)
     vprov.add_argument("--message-id", required=True)
+    renable = commands.add_parser("recovery-enable")
+    renable.add_argument("--db", required=True)
+    rinfo = commands.add_parser("recovery-info")
+    rinfo.add_argument("--db", required=True)
+    rcheck = commands.add_parser("recovery-checkpoint")
+    rcheck.add_argument("--db", required=True)
+    rcheck.add_argument("--output", required=True)
+    rauth = commands.add_parser("recovery-authority")
+    rauth.add_argument("--db", required=True)
+    rauth.add_argument("--output", required=True)
+    rrestore = commands.add_parser("recovery-restore")
+    rrestore.add_argument("--checkpoint", required=True)
+    rrestore.add_argument("--checkpoint-sha256", required=True)
+    rrestore.add_argument("--authority", required=True)
+    rrestore.add_argument("--authority-sha256", required=True)
+    rrestore.add_argument("--min-revision", required=True)
+    rrestore.add_argument("--db", required=True)
     args = p.parse_args()
     try:
         if args.command == "import":
@@ -110,6 +127,19 @@ def main():
             result = collection.collection_show(args.db, args.intake_id)
         elif args.command == "vault-provenance":
             result = collection.vault_provenance(args.db, args.message_id)
+        elif args.command == "recovery-enable":
+            result = recovery.enable(args.db)
+        elif args.command == "recovery-info":
+            result = recovery.info(args.db)
+        elif args.command == "recovery-checkpoint":
+            result = recovery.checkpoint(args.db, args.output)
+        elif args.command == "recovery-authority":
+            result = recovery.authority(args.db, args.output)
+        elif args.command == "recovery-restore":
+            result = recovery.restore(
+                args.checkpoint, args.checkpoint_sha256, args.authority,
+                args.authority_sha256, recovery.parse_revision(args.min_revision),
+                args.db)
         else:
             result = vault.vault_thread(args.db, args.message_id)
         print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -12,6 +12,8 @@ uv pip install --offline --python .venv/bin/python -r requirements-build.lock
 uv pip install --offline --python .venv/bin/python --no-build-isolation --no-deps .
 uv pip check --python .venv/bin/python
 .venv/bin/python -I -m unittest discover -s tests -v
+.venv/bin/python -I fixtures/recovery/verify_fixtures.py   # 复核恢复演示样例未漂移
+PYTHONPATH=src .venv/bin/python tooling/demo_values.py           # 打印恢复演示的独立预期值
 ```
 
 以上离线命令需要缓存已有setuptools==80.9.0和wheel==0.45.1；无缓存时先准备这两个公共构建工具，不声称空缓存可离线安装。修改源码后重装本仓。
@@ -79,6 +81,48 @@ uv pip check --python .venv/bin/python
 ```
 
 预期：`selected_packages` 为 `["PKG-Y"]`，`total_value` 为 10，`inserted` 为 `["<parent-p@example.invalid>"]`；`excluded` 只有 `PKG-X`，`reason` 为 `selected_identity_conflict`，`witness` 为 `["<parent-p@example.invalid>"]`。`collection-show` 返回同一首次收据；`vault-provenance` 列出 `PKG-Y`/`CUST-Y`/10 一条来源。若该 intake 前已存在锚定 A 的保全与预先含 R 的清除计划，Y 入档后 R 沿补全父链进入保全，执行旧计划应被整次阻断。`PKG-X` 独用另一没有 Y 的独立输入时得到空选择，`excluded` 为真正闭合父链的 `reply_cycle` witness。
+
+## 离线灾备取证恢复（recovery-*）
+
+正常源 vault 可在事故前开启恢复跟踪、定期保存自包含检查点并导出清除权威清单；事故后即使原 vault 和全部邮件目录都已丢失，也能凭两份离线材料在新路径重建当时业务记录，供调查人员只读回看。恢复以检查点时点为业务边界并叠加较新的合法清除：检查点后被依法清除的身份在副本中仍为无载荷、不可检索的 purged 节点。恢复副本永久只读，拒绝一切写入口。
+
+以下演示使用 `fixtures/recovery/`：开库时有 live 的 `<crane@…>`（含附件）、其后代 `<crane-reply@…>`、keeper `<supplier@…>` 与已有成功清除收据的 purged `<legacy@…>`。随后登记包含 `<crane@…>` 和 `<supplier@…>` 的两个外审批次、回收意见并采集来源，保存检查点 C；再清除 `<crane@…>` 与其后代、摄取检查点之后的新邮件 `<late@…>`，导出较新权威 A；最后删除原 vault 及演示用源目录（样例目录本身不删），仅凭 C+A 恢复。
+
+```sh
+.venv/bin/mail-archive vault-init --source fixtures/recovery/batch1 --db run/recovery.sqlite
+.venv/bin/mail-archive recovery-enable --db run/recovery.sqlite
+.venv/bin/mail-archive retention-plan --db run/recovery.sqlite --plan-id RECOVERY-OLD --before 2026-11-02T12:00:00Z
+.venv/bin/mail-archive retention-apply --db run/recovery.sqlite --plan-id RECOVERY-OLD
+.venv/bin/mail-archive review-open --db run/recovery.sqlite --spec fixtures/recovery/spec-m.json
+.venv/bin/mail-archive review-open --db run/recovery.sqlite --spec fixtures/recovery/spec-k.json
+.venv/bin/mail-archive review-export --db run/recovery.sqlite --review-id RECOVERY-M --output run/ext-m.json
+.venv/bin/mail-archive review-export --db run/recovery.sqlite --review-id RECOVERY-K --output run/ext-k.json
+.venv/bin/mail-archive review-return --db run/recovery.sqlite --review-id RECOVERY-M \
+    --package run/ext-m.json --feedback fixtures/recovery/feedback-m.json
+.venv/bin/mail-archive collection-import --db run/recovery.sqlite --manifest fixtures/recovery/manifest.json
+.venv/bin/mail-archive recovery-checkpoint --db run/recovery.sqlite --output run/checkpoint.json
+.venv/bin/mail-archive recovery-authority --db run/recovery.sqlite --output run/authority-checkpoint.json
+.venv/bin/mail-archive retention-plan --db run/recovery.sqlite --plan-id RECOVERY-M-PURGE --before 2026-11-03T09:30:00Z
+.venv/bin/mail-archive retention-apply --db run/recovery.sqlite --plan-id RECOVERY-M-PURGE
+.venv/bin/mail-archive vault-ingest --source fixtures/recovery/later --db run/recovery.sqlite
+.venv/bin/mail-archive recovery-authority --db run/recovery.sqlite --output run/authority.json
+```
+
+事故后从已发布文件独立核算外部摘要（不得用文件内自报字段），再恢复：
+
+```sh
+CSHA=$(sha256sum run/checkpoint.json | cut -d' ' -f1)
+ASHA=$(sha256sum run/authority.json | cut -d' ' -f1)
+.venv/bin/mail-archive recovery-restore --checkpoint run/checkpoint.json --checkpoint-sha256 "$CSHA" \
+    --authority run/authority.json --authority-sha256 "$ASHA" --min-revision 6 --db run/recovered.sqlite
+.venv/bin/mail-archive recovery-info --db run/recovered.sqlite
+.venv/bin/mail-archive vault-thread --db run/recovered.sqlite --message-id '<crane-reply@example.invalid>'
+.venv/bin/mail-archive vault-search --db run/recovered.sqlite --query cracked
+.venv/bin/mail-archive review-notes --db run/recovered.sqlite --message-id '<crane@example.invalid>'
+.venv/bin/mail-archive review-export --db run/recovered.sqlite --review-id RECOVERY-M --output run/blocked.json
+```
+
+预期：`recovery-enable` 输出 `mode` 为 `source`、`revision` 为 0 的对象。`recovery-checkpoint`/`recovery-authority` 输出恰含 `vault`、`stream`、`revision`、`sha256`、`bytes`（或 `purged_count`）；本演示中检查点水位为 6，`recovery-restore` 的 `--min-revision` 即取该值。恢复后 `recovery-info` 的 `mode` 为 `recovered`，`revision` 为 6，`authority_revision` 为 9，`suppressed` 为 `["<crane-reply@example.invalid>", "<crane@example.invalid>"]`。线程中两者均为 `purged`（无 subject/sender）且父子连通；`cracked` 搜索为空而 `bearings` 仍命中 `<supplier@…>`；`review-notes` 仍返回审阅者意见；对 `RECOVERY-M` 的 `review-export` 退出 2 且不留文件，`RECOVERY-K` 换新路径仍可导出且字节与登记一致；任何写入口（含旧成功清除重送）在副本上退出 2 且库文件逐字节不变。
 
 ## 契约与边界
 

@@ -1,0 +1,9 @@
+From: late@example.invalid
+To: archive@example.invalid
+Date: Wed, 04 Nov 2026 08:00:00 +0000
+Message-ID: <late@example.invalid>
+Subject: Late mail
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+Message sent after the checkpoint was captured.

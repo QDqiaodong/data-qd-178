@@ -1,0 +1,21 @@
+From: inspector@example.invalid
+To: archive@example.invalid
+Date: Tue, 03 Nov 2026 08:00:00 +0000
+Message-ID: <crane@example.invalid>
+Subject: Crane inspection report
+MIME-Version: 1.0
+Content-Type: multipart/mixed; boundary="RECOVERY-BOUNDARY"
+
+--RECOVERY-BOUNDARY
+Content-Type: text/plain; charset=utf-8
+
+Crane inspection found a cracked bracket on pier seven.
+
+--RECOVERY-BOUNDARY
+Content-Type: application/octet-stream; name="bracket-photo.txt"
+Content-Disposition: attachment; filename="bracket-photo.txt"
+Content-Transfer-Encoding: base64
+
+cmF3IGJyYWNrZXQgcGhvdG8gYnl0ZXM=
+
+--RECOVERY-BOUNDARY--
